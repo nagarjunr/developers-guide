@@ -89,6 +89,8 @@ This repository serves as a comprehensive knowledge base for developers working 
 - [Secrets Management Strategies](devops/kubernetes/secrets-management-strategies.md)
 - [nginx Proxy Buffer Errors in OpenShift](devops/kubernetes/nginx-proxy-buffer-errors-openshift.md) - Troubleshooting ERR_CONTENT_LENGTH_MISMATCH
 - [Terraform IaC Workflow Guide](devops/terraform/iac-workflow-guide.md)
+- [UV and Corporate Proxies](devops/uv-corporate-proxy-setup.md) - Fixing UV behind SSL-intercepting proxies
+- [Enterprise Python Setup](devops/enterprise-python-setup.md) - Corporate networks, proxies, and CA certificates
 
 ### Full-Stack Development
 - [FastAPI Best Practices](fullstack/backend/fastapi-best-practices.md)
