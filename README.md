@@ -91,6 +91,7 @@ This repository serves as a comprehensive knowledge base for developers working 
 - [Terraform IaC Workflow Guide](devops/terraform/iac-workflow-guide.md)
 - [UV and Corporate Proxies](devops/uv-corporate-proxy-setup.md) - Fixing UV behind SSL-intercepting proxies
 - [Enterprise Python Setup](devops/enterprise-python-setup.md) - Corporate networks, proxies, and CA certificates
+- [Docker Builds Behind Corporate Proxies](devops/docker-corporate-proxy-build.md) - host-gateway, build-arg proxies, and private Git deps
 
 ### Full-Stack Development
 - [FastAPI Best Practices](fullstack/backend/fastapi-best-practices.md)
