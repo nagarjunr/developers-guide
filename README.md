@@ -1,4 +1,4 @@
-# A Developer's Diary
+# Developer's Guide
 
 A curated collection of publicly shareable programming concepts, best practices, and guides covering modern software development domains.
 
@@ -125,8 +125,8 @@ If you find this compilation useful and share or adapt the content:
 
 ```
 Compiled by: Nagarjun Rajendran
-Repository: A Developer's Diary
-GitHub: https://github.com/nagarjunr/A_Developers_Diary
+Repository: Developer's Guide
+GitHub: https://github.com/nagarjunr/developers-guide
 LinkedIn: https://www.linkedin.com/in/nagarjunr/
 ```
 

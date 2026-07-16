@@ -765,8 +765,8 @@ If you found this guide helpful and share or adapt the content, please give cred
 
 ```
 Troubleshooting Guide by: Nagarjun Rajendran
-Repository: A Developer's Diary
-GitHub: https://github.com/nagarjunr/A_Developers_Diary
+Repository: Developer's Guide
+GitHub: https://github.com/nagarjunr/developers-guide
 ```
 
 **Feedback:**
