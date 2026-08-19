@@ -65,6 +65,23 @@ LLM inference is really two phases with opposite resource profiles:
 | **Prefill** | Reads the full input prompt, computes KV-cache for all of it at once | **Compute-bound** — large parallel matrix math across many tokens at once |
 | **Decode** | Generates one output token at a time, reading the KV-cache built so far | **Memory-bandwidth-bound** — small amount of math per token, but a large amount of data (weights + KV-cache) must be read from memory each step |
 
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#1f77b4','primaryTextColor':'#fff','primaryBorderColor':'#145a8c','lineColor':'#5a5a5a','secondaryColor':'#ff7f0e','tertiaryColor':'#2ca02c'}}}%%
+flowchart TB
+    subgraph Prefill["Prefill Phase"]
+        P1["Full prompt<br/>(many tokens at once)"]:::blue --> P2["Large parallel<br/>matrix math"]:::orange
+        P2 --> P3["Bottleneck:<br/>Compute (FLOPS)"]:::red
+    end
+    subgraph Decode["Decode Phase"]
+        D1["One new token<br/>per step"]:::blue --> D2["Read full weights<br/>+ KV-cache from memory"]:::orange
+        D2 --> D3["Bottleneck:<br/>Memory Bandwidth"]:::red
+    end
+
+    classDef blue fill:#4A90E2,stroke:#2E5C8A,color:#fff
+    classDef orange fill:#F39C12,stroke:#BA7A0A,color:#fff
+    classDef red fill:#E74C3C,stroke:#A93226,color:#fff
+```
+
 Running both phases on the same GPU, interleaved as requests arrive, creates interference: a burst of new prompts (prefill) competes for the same silicon as in-flight token generation for other users (decode), stalling one or the other.
 
 ---
@@ -75,6 +92,20 @@ These two terms both describe "waiting on data," but they refer to different phy
 
 - **Memory bandwidth** is the speed limit on the short trip from a GPU's own memory (HBM, physically stacked next to its compute cores) to the compute cores themselves. Modern GPUs can perform far more math per second (FLOPS) than they can move data per second from their own memory — a gap sometimes called the **memory wall**. Decode is memory-bandwidth-bound because it moves a large amount of data (full model weights, full KV-cache) to do a comparatively small amount of math per token.
 - **Data movement** (in the broader sense) is the speed limit on the much longer trip *between separate GPUs, servers, or devices* — over NVLink, InfiniBand, RoCE, or standard Ethernet. This hop is orders of magnitude farther than the HBM-to-core hop, often has a CPU sitting in the path copying between buffers, and only becomes relevant once a workload spans more than one chip (multi-GPU serving, disaggregated pools, or edge devices talking to a server).
+
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#1f77b4','primaryTextColor':'#fff','primaryBorderColor':'#145a8c','lineColor':'#5a5a5a','secondaryColor':'#ff7f0e','tertiaryColor':'#2ca02c'}}}%%
+flowchart LR
+    subgraph OnChip["Within One GPU — short hop"]
+        HBM["GPU Memory<br/>(HBM)"]:::blue -- "Memory Bandwidth<br/>(GB/s)" --> Cores["Compute Cores"]:::green
+    end
+    subgraph OffChip["Across GPUs / Servers — long hop"]
+        GPUA["GPU A"]:::blue -- "Data Movement<br/>NVLink / InfiniBand / RoCE / Ethernet<br/>(often via CPU)" --> GPUB["GPU B"]:::green
+    end
+
+    classDef blue fill:#4A90E2,stroke:#2E5C8A,color:#fff
+    classDef green fill:#50C878,stroke:#2E8B57,color:#fff
+```
 
 Fixing one does not fix the other — they are different bottlenecks on different hardware, and each becomes visible only after the previous one is resolved:
 
@@ -95,6 +126,25 @@ Latency isn't one number — it's a distribution. Reporting only the **average**
 **Why the tail matters more than it seems:** a user making many requests over time will eventually hit the tail, even if it's rare per-request. Production SLAs are typically written in tail terms ("99.9% under 200ms"), not averages, because that's what actually captures user-facing pain.
 
 **Why it gets worse at scale, not better ("the tail at scale"):** if a single request has to fan out to *N* other services or nodes in parallel and wait for all of them before continuing, the chance that *at least one* of those N calls lands in the slow tail compounds with N. Adding more parallel dependencies degrades overall P99 even if no individual component got any slower — you've added more chances for one unlucky component to stall the whole request. This is the same reason distributed, synchronous LLM serving (e.g. tensor parallelism, disaggregated pools) is more sensitive to tail latency than a single-node deployment.
+
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#1f77b4','primaryTextColor':'#fff','primaryBorderColor':'#145a8c','lineColor':'#5a5a5a','secondaryColor':'#ff7f0e','tertiaryColor':'#2ca02c'}}}%%
+flowchart TD
+    Req["Incoming Request"]:::blue --> N1["Node 1<br/>~5ms"]:::green
+    Req --> N2["Node 2<br/>~5ms"]:::green
+    Req --> N3["Node 3<br/>~5ms"]:::green
+    Req --> N4["Node 4 (unlucky)<br/>~500ms — the tail"]:::red
+    N1 --> Join["Wait for ALL<br/>nodes to respond"]:::orange
+    N2 --> Join
+    N3 --> Join
+    N4 --> Join
+    Join --> Resp["Response time = SLOWEST node<br/>(~500ms, not ~5ms)"]:::red
+
+    classDef blue fill:#4A90E2,stroke:#2E5C8A,color:#fff
+    classDef green fill:#50C878,stroke:#2E8B57,color:#fff
+    classDef orange fill:#F39C12,stroke:#BA7A0A,color:#fff
+    classDef red fill:#E74C3C,stroke:#A93226,color:#fff
+```
 
 ---
 
