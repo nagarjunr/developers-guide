@@ -93,6 +93,7 @@ This repository serves as a comprehensive knowledge base for developers working 
 - [UV and Corporate Proxies](devops/uv-corporate-proxy-setup.md) - Fixing UV behind SSL-intercepting proxies
 - [Enterprise Python Setup](devops/enterprise-python-setup.md) - Corporate networks, proxies, and CA certificates
 - [Docker Builds Behind Corporate Proxies](devops/docker-corporate-proxy-build.md) - host-gateway, build-arg proxies, and private Git deps
+- [Secure Remote Access Patterns](devops/secure-remote-access-patterns.md) - Port forwarding vs. Tailscale vs. reverse SSH vs. ngrok for edge devices
 
 ### Full-Stack Development
 - [FastAPI Best Practices](fullstack/backend/fastapi-best-practices.md)
