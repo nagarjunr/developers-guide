@@ -111,6 +111,7 @@ Install the agent on the device and on whatever you want to access it from; both
 
 ```bash
 curl -fsSL https://tailscale.com/install.sh | sh
+sudo systemctl enable --now tailscaled
 sudo tailscale up
 tailscale ip -4   # stable 100.x.x.x address, reachable from any device on your tailnet
 ```
@@ -120,6 +121,17 @@ ssh user@100.x.x.x   # from any machine also on the tailnet
 ```
 
 No router configuration, no open inbound ports, works through CGNAT because both sides only ever make outbound connections to Tailscale's coordination servers (actual traffic is typically direct peer-to-peer, encrypted via WireGuard).
+
+**Verify:**
+
+```bash
+tailscale status   # confirms the device is authenticated and shows peers on the tailnet
+```
+
+**Platform notes (e.g. Jetson Nano / older arm64 boards):**
+
+- Older Jetson Nano images sometimes ship an aging Ubuntu 18.04 base without `curl` preinstalled — run `sudo apt update && sudo apt install -y curl` first if the install script fails to fetch.
+- `sudo tailscale up` only needs to be run once; the auth token persists across reboots since `tailscaled` is enabled as a systemd service.
 
 ### 3. Reverse SSH Tunnel
 
