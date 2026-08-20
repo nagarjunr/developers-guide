@@ -1,177 +1,154 @@
-# Bridging a Home LAN to a Cloud Agent Sandbox: Ollama + Home Assistant on a Jetson
+# Bridging Cloud AI Agents to Home-Network Devices (Tailscale + Ollama + Home Assistant)
 
-## Why this exists
+## Problem
 
-A cloud-hosted AI agent (running in a VPS/container/sandbox) cannot reach devices on
-your home LAN by default — private IPs like `192.168.x.x` or `10.0.0.x` simply aren't
-routable from the public internet. This guide walks through a real debugging session
-that bridged a cloud agent to a home Jetson Orin Nano (running Ollama) and a Home
-Assistant OS instance, using Tailscale as the mesh network, and documents every real
-pitfall hit along the way — SSH auth failures that looked like network failures,
-a bind-address gotcha in Ollama, and a subtle Home Assistant config flag that had
-nothing to do with the model itself.
+A cloud-hosted AI agent (VPS, container, cloud sandbox) cannot reach devices on a home
+LAN by default. Private IPs like `192.168.x.x` or `10.0.0.x` are not routable from the
+public internet — any direct connection attempt from a cloud environment to a home
+device's LAN IP will fail with `No route to host` or a timeout. This is expected
+network behavior, not a misconfiguration to "fix" on the home-device side.
 
-None of this is Jetson-specific or Home-Assistant-specific in principle — the same
-pattern applies to any "cloud agent needs to reach a home-network appliance" scenario
-(a NAS, a Raspberry Pi, a self-hosted service).
+This guide covers the general pattern for solving this — using Tailscale as a mesh
+overlay network — plus the specific gotchas encountered when the home devices in
+question are an **Ollama** LLM server and a **Home Assistant OS** instance, since that
+combination surfaces several non-obvious configuration pitfalls beyond the basic
+networking problem.
 
-## Architecture overview
+## Architecture
 
 ```mermaid
 flowchart TB
-    subgraph Cloud["Cloud Sandbox (Azure VM / any VPS)"]
-        Agent["AI Agent<br/>(Hermes / Claude Code / etc.)"]
+    subgraph Cloud["Cloud Sandbox (any VPS/container)"]
+        Agent["AI Agent"]
     end
 
-    subgraph Tailnet["Tailscale Mesh Network (overlay, NAT-traversing)"]
-        TS["Tailscale coordination<br/>100.x.x.x address space"]
+    subgraph Tailnet["Tailscale Mesh (overlay, NAT-traversing, 100.x.x.x)"]
+        TS["Tailscale coordination service"]
     end
 
-    subgraph HomeLAN["Home LAN (10.0.0.0/24)"]
-        Jetson["Jetson Orin Nano<br/>10.0.0.2 (LAN) / 100.66.237.104 (Tailscale)<br/>Ollama :11434"]
-        HA["Home Assistant OS<br/>10.0.0.x (LAN) / 100.107.143.28 (Tailscale)<br/>Core :8123, SSH add-on :22"]
+    subgraph HomeLAN["Home LAN (private subnet, e.g. 10.0.0.0/24)"]
+        DeviceA["Home device A<br/>(e.g. Ollama server)"]
+        DeviceB["Home device B<br/>(e.g. Home Assistant)"]
     end
 
     Agent -- "SSH / HTTP via Tailscale IP" --> TS
-    TS -- "encrypted overlay tunnel" --> Jetson
-    TS -- "encrypted overlay tunnel" --> HA
-    HA -- "LAN-local HTTP<br/>(same network, no Tailscale needed)" --> Jetson
+    TS -- "encrypted overlay tunnel" --> DeviceA
+    TS -- "encrypted overlay tunnel" --> DeviceB
+    DeviceB -- "LAN-local HTTP<br/>(same network, no Tailscale hop needed)" --> DeviceA
 
     style Cloud fill:#0f172a,color:#fff
     style Tailnet fill:#0d9488,color:#fff
     style HomeLAN fill:#1e293b,color:#fff
 ```
 
-**Key insight:** the cloud agent always reaches home devices via their Tailscale
-(`100.x.x.x`) address — never the LAN address. But two devices that are *already on
-the same home LAN* (like Home Assistant and the Jetson here) can talk to each other
-over the plain local IP; they don't need Tailscale between themselves at all, since
-Tailscale is solving the "how does the cloud agent get in" problem, not a
-device-to-device problem.
+**Key principle:** the cloud agent always reaches home devices via their Tailscale
+overlay address — never the LAN address. But two devices already on the same home LAN
+can talk to each other over their plain local IPs; Tailscale solves "how does the
+outside agent get in," not device-to-device communication within the LAN itself.
 
-## Part 1 — Reaching a home device from a cloud sandbox (Tailscale)
-
-### The core problem
-
-A private IP the user gives you (`10.0.0.2`, `192.168.1.50`) is not reachable from a
-cloud sandbox — you'll get `No route to host` or a timeout on the first attempt. This
-is expected, not a misconfiguration.
-
-### The fix
+## Setting up the Tailscale bridge
 
 ```mermaid
 sequenceDiagram
     participant Agent as Cloud Agent
     participant TSCoord as Tailscale Coordination Server
-    participant Device as Home Device (Jetson/HA/etc.)
+    participant Device as Home Device
 
     Agent->>Agent: curl -fsSL https://tailscale.com/install.sh | sh
     Agent->>TSCoord: sudo tailscale up --hostname=<name>
     TSCoord-->>Agent: auth URL (https://login.tailscale.com/a/xxxxx)
-    Note over Agent: Surface URL to user, wait for browser approval
-    Device->>TSCoord: tailscale up (user runs this on the device too)
+    Note over Agent: Open URL in a browser, approve
+    Device->>TSCoord: tailscale up (run once on the device itself)
     Agent->>TSCoord: tailscale status
-    TSCoord-->>Agent: 100.66.237.104  rna-jetson  active
-    Agent->>Device: ssh -i <key> user@100.66.237.104
+    TSCoord-->>Agent: 100.x.x.x   device-name   active
+    Agent->>Device: ssh -i <key> user@100.x.x.x
     Device-->>Agent: connected
 ```
 
 Once both sides are authenticated to the same tailnet, `tailscale status` lists every
-device with its overlay IP — that's the address to use for everything going forward,
-not the original LAN IP.
+device with its overlay IP. Use that address for everything going forward instead of
+the original LAN IP.
 
-### Pitfall: "port unreachable" vs. "auth rejected" look identical at first glance
+## Diagnosing SSH failures: network-unreachable vs. auth-rejected
 
-A generic SSH `Permission denied` error can come from two completely different root
-causes, and it's easy to misdiagnose one as the other:
+A generic SSH `Permission denied` can stem from two entirely different causes that look
+identical at a glance:
 
-1. **Real network unreachability** — port closed, firewalled, or the device is offline.
-2. **Real auth rejection** — the port is open, the SSH daemon is running and responding,
-   but the offered key isn't authorized.
+1. **Network unreachability** — port closed, firewalled, or device offline.
+2. **Auth rejection** — port open, daemon responding, but the offered key isn't
+   authorized (or the wrong username was used).
 
-**Diagnose which one you're facing before touching any keys:**
+Diagnose the transport independently of SSH auth before touching any keys:
 
 ```bash
-# Does the transport even work? (independent of any SSH auth)
+# Transport-layer check (no SSH auth involved)
 tailscale ping --timeout=5s <device-hostname>
 timeout 8 bash -c "cat < /dev/null > /dev/tcp/<tailscale-ip>/22" && echo OPEN || echo CLOSED
 nc -zv -w 5 <tailscale-ip> 22
 
-# If OPEN: it's an auth problem, not a network problem. Get the exact rejection reason:
-ssh -i <key> -o ConnectTimeout=10 -v <user>@<host> "echo ok" 2>&1 | grep -iE "identity file|offering|denied|no more auth"
+# If OPEN, get the exact SSH-layer rejection reason:
+ssh -i <key> -o ConnectTimeout=10 -v <user>@<host> "echo ok" 2>&1 \
+  | grep -iE "identity file|offering|denied|no more auth"
 ```
 
-If the TCP port test succeeds but SSH still fails, the verbose output tells you exactly
-what happened: `Offering public key: ... SHA256:<fingerprint>` followed immediately by
+If the port check succeeds but SSH still fails, the verbose log is definitive:
+`Offering public key: ... SHA256:<fingerprint>` immediately followed by
 `Authentications that can continue: publickey,password` means the server saw the key
-and rejected it — not a network issue, not a wrong port, just a key not in
-`authorized_keys` (or the wrong username).
+and rejected it outright — a key/username problem, not a network problem.
 
-### Pitfall: rebooting a device makes it briefly disappear from Tailscale, then it's an auth issue again
+**Two common causes of a clean auth rejection when the key genuinely is correct:**
 
-After a reboot, `tailscale status` will show `offline, last seen Xs ago` for a short
-window while the device's network stack and `tailscaled` daemon come back up (typically
-30s-2min, hardware dependent). Don't immediately retry SSH during this window and
-conclude something is broken — wait for `tailscale status` to show `active` (ideally
-`active; direct <ip>:<port>` rather than `active; relay "..."`, which indicates a
-direct P2P connection was established, lower latency) before retrying.
+- **Wrong username.** SSH defaults to the *client's own local username* unless told
+  otherwise. If the cloud sandbox's local account name doesn't match any account on the
+  target device, every key attempt fails cleanly regardless of correctness:
+  ```bash
+  ssh -i <key> <tailscale-ip>                       # defaults to this machine's own username — often wrong
+  ssh -i <key> <actual-remote-username>@<tailscale-ip>   # confirm the real username explicitly
+  ```
+- **Post-reboot transition window.** After a device reboots, `tailscale status` briefly
+  shows `offline, last seen Xs ago` while networking and `tailscaled` come back up
+  (roughly 30s-2min). Retrying SSH during this window looks like an auth failure but is
+  really "device isn't on the tailnet yet." Wait for `active` (ideally
+  `active; direct <ip>:<port>`, indicating a direct P2P path rather than a relay) before
+  retrying.
 
-### Pitfall: wrong username assumption
+## Home Assistant OS: SSH is a separate surface from a normal Linux box
 
-If the cloud sandbox's own local account name (e.g. `azureuser` on an Azure VM) doesn't
-match any account on the target device, every key attempt fails with a clean auth
-rejection regardless of whether the key itself is correctly authorized. SSH defaults to
-using the *client's own username* unless told otherwise — always confirm the actual
-account name the user logs in as on the target device rather than assuming it matches
-the agent's own hostname/username.
+HAOS does not run a plain OpenSSH daemon on port 22 by default. SSH access comes via
+the "Advanced SSH & Web Terminal" **add-on**, which differs from a standard Linux SSH
+setup in several ways:
 
-```bash
-# Wrong (defaults to this VM's own username):
-ssh -i <key> <tailscale-ip>
-
-# Right (explicit target username, confirmed with the device owner):
-ssh -i <key> <actual-username>@<tailscale-ip>
-```
-
-## Part 2 — Home Assistant OS: a second, different SSH surface
-
-Home Assistant OS (HAOS) does not expose a plain OpenSSH daemon on port 22 by default —
-that's reserved for the "Advanced SSH & Web Terminal" **add-on**, which:
-
-- Runs its own **Dropbear** SSH server (not OpenSSH) — identifiable by its banner:
+- It runs **Dropbear**, not OpenSSH — identifiable by its banner:
   `SSH-2.0-dropbear_2026.91`.
-- Has its own **separate `authorized_keys` config**, edited through the add-on's own
-  configuration UI (a YAML block), not a file you can directly append to over SSH the
-  normal way until you're already in.
-- Has a config flag that can leave the SSH *daemon itself disabled* even while the
-  add-on process and its underlying port mapping mechanics look otherwise fine — check
-  the add-on's own log output for a line like:
+- Authorized keys are configured through the **add-on's own YAML config UI**, not a
+  file you edit directly over an existing SSH session the normal way.
+- The add-on has its own **enable/disable toggle for the SSH daemon itself**,
+  independent of whether `authorized_keys` is populated correctly. Check the add-on's
+  own log for definitive state:
   ```
   WARNING: SSH port is disabled. Prevent start of SSH server.
   ```
-  vs., once fixed:
+  versus, once enabled:
   ```
   INFO: Starting the SSH daemon...
   Server listening on 0.0.0.0 port 22.
   ```
-- The add-on's **external port mapping can differ from the container-internal port**
-  the daemon actually binds (e.g. daemon listens on container-internal port 22, but the
-  add-on's Network tab maps that to a different external port like 22222, or the
-  external port needs to be explicitly set to match). If a specific port doesn't
-  respond as expected, try the daemon's *stated* listening port directly, and check the
-  add-on's own startup log for the literal `Server listening on ... port N` line rather
-  than assuming a commonly-documented default port is correct for a given install.
+- The add-on's **external port mapping can differ from the daemon's actual bind port**.
+  Rather than assuming a commonly documented default (e.g. 22222), check the add-on's
+  log for the literal `Server listening on ... port N` line and connect to that port.
+- Config changes to the add-on frequently require a full **Stop → Start**, not just
+  "Restart" — some versions only re-read config on a genuine stop/start cycle.
 
 ```mermaid
 flowchart LR
-    A["SSH attempt to HAOS"] --> B{"Port 22 (default)<br/>reachable?"}
-    B -- "refused" --> C["Try the add-on's<br/>configured external port<br/>e.g. 22222"]
-    B -- "open, but auth fails" --> D["Check add-on log for<br/>'SSH port is disabled'"]
-    C --> E{"Auth still fails?"}
-    D -- "disabled" --> F["Enable SSH in add-on config,<br/>full Stop -> Start (not just Restart)"]
-    D -- "daemon running,<br/>key still rejected" --> G["Verify authorized_keys<br/>in add-on YAML config<br/>matches byte-for-byte"]
+    A["SSH attempt to HAOS"] --> B{"Port reachable?"}
+    B -- "refused" --> C["Check add-on's configured<br/>external port in its Network tab"]
+    B -- "open, auth fails" --> D["Check add-on log for<br/>'SSH port is disabled'"]
+    C --> E{"Still fails on that port?"}
+    D -- "disabled" --> F["Enable SSH in config,<br/>full Stop -> Start"]
+    D -- "daemon running,<br/>key rejected" --> G["Verify authorized_keys<br/>in add-on YAML,<br/>byte-for-byte"]
     E --> G
-    F --> H["Check add-on log for<br/>'Server listening on ... port N'<br/>-- use that exact port"]
+    F --> H["Confirm log shows<br/>'Server listening on ... port N'"]
     G --> H
     H --> I["ssh -i key -p <actual-port> <user>@<tailscale-ip>"]
 
@@ -179,69 +156,63 @@ flowchart LR
     style H fill:#0d9488,color:#fff
 ```
 
-### Where the actual config lives once you're in
+### Where integration config actually lives
 
-Home Assistant's runtime state (including every integration's configuration) is stored
-as JSON under `/homeassistant/.storage/`, most notably `core.config_entries`. This is
-useful for debugging integration-level settings that aren't obviously exposed as a
-simple toggle in the UI, or for confirming a UI change actually persisted:
+Home Assistant stores runtime integration state as JSON under
+`/homeassistant/.storage/`, most notably `core.config_entries`. This is useful for
+confirming a UI change actually persisted, or for inspecting a setting that isn't
+exposed as an obvious toggle:
 
 ```bash
-# List integration-related storage files
 ls /homeassistant/.storage/ | grep -iE 'ollama|conversation|assist_pipeline|config_entries'
-
-# Inspect one integration's stored config (jq is available on HAOS; python3 often is not)
-jq '.data.entries[] | select(.domain=="ollama")' /homeassistant/.storage/core.config_entries
+jq '.data.entries[] | select(.domain=="<integration_domain>")' /homeassistant/.storage/core.config_entries
 ```
 
-**Always back up before editing:**
+Always back up before editing:
 ```bash
 cp /homeassistant/.storage/core.config_entries \
    /homeassistant/.storage/core.config_entries.bak_$(date +%Y%m%d_%H%M%S)
 ```
 
-**Edit surgically with `jq`, not by hand-editing JSON** (avoids formatting mistakes in
-a large single-line file):
+Edit surgically with `jq` rather than hand-editing the (usually single-line, large)
+JSON file directly:
 ```bash
-jq -c '(.data.entries[] | select(.domain=="ollama") | .subentries[] |
-        select(.subentry_type=="conversation") | .data.<field>) = <value>' \
+jq -c '(.data.entries[] | select(.domain=="<domain>") | .subentries[] |
+        select(.subentry_type=="<type>") | .data.<field>) = <value>' \
   /homeassistant/.storage/core.config_entries > /tmp/patched.json
 cp /tmp/patched.json /homeassistant/.storage/core.config_entries
 ```
 
-**Config storage files are read on startup, not live-watched** — a direct edit like
-this needs `ha core restart` (expect 1-3 minutes; poll the web UI port rather than
-trusting the SSH command's own timeout, since the restart process detaches from the
-SSH session):
+Storage files are read on startup, not live-watched — apply changes with a restart, and
+poll for the web UI coming back rather than trusting the restart command's own session
+timeout (HA Core restarts commonly take 1-3 minutes and detach from the invoking shell):
 ```bash
 ha core restart
 # poll instead of waiting on the command itself:
 # timeout 8 bash -c "cat < /dev/null > /dev/tcp/<ha-ip>/8123" && echo "UI reachable"
 ```
 
-## Part 3 — Ollama: the bind-address pitfall
+## Ollama: default bind address is localhost-only
 
-By default, a freshly-installed Ollama service binds to `127.0.0.1:11434` —
-**localhost only**. This works perfectly when you `curl localhost:11434` *from the same
-machine Ollama is running on* (which is how a lot of "quick test" verification happens),
-but is completely unreachable from any other device on the network, including
-another appliance on the same LAN (like Home Assistant talking to a Jetson) — with no
-firewall involved at all; the socket simply isn't listening on any externally-reachable
-interface.
+A freshly installed Ollama service binds to `127.0.0.1:11434` by default. This works
+when testing directly on the same machine Ollama runs on (`curl localhost:11434`), but
+is completely unreachable from any other device — including another appliance on the
+same LAN — with no firewall involved; the socket simply isn't listening on any
+externally-reachable interface.
 
 ```mermaid
 flowchart LR
-    subgraph Before["Before fix"]
-        O1["ollama serve<br/>binds 127.0.0.1:11434"]
-        L1["localhost curl:<br/>WORKS"]
-        R1["LAN/remote curl:<br/>connection refused"]
+    subgraph Before["Default (bind 127.0.0.1)"]
+        O1["ollama serve"]
+        L1["localhost curl: WORKS"]
+        R1["LAN/remote curl: refused"]
         O1 --> L1
         O1 -.->|"not listening<br/>on this interface"| R1
     end
-    subgraph After["After fix"]
-        O2["ollama serve<br/>binds 0.0.0.0:11434<br/>(via OLLAMA_HOST env var)"]
-        L2["localhost curl:<br/>WORKS"]
-        R2["LAN/remote curl:<br/>WORKS"]
+    subgraph After["Fixed (bind 0.0.0.0)"]
+        O2["ollama serve<br/>OLLAMA_HOST=0.0.0.0:11434"]
+        L2["localhost curl: WORKS"]
+        R2["LAN/remote curl: WORKS"]
         O2 --> L2
         O2 --> R2
     end
@@ -249,17 +220,15 @@ flowchart LR
     style R2 fill:#0d9488,color:#fff
 ```
 
-### Diagnose
-
+Diagnose:
 ```bash
 sudo ss -tlnp | grep 11434
-# 127.0.0.1:11434   <- localhost-only, the bug
-#        *:11434    <- all interfaces, fixed
+# 127.0.0.1:11434   <- localhost-only
+#        *:11434    <- all interfaces
 ```
 
-### Fix — a systemd drop-in override (survives package upgrades, cleaner than editing
-the shipped unit file directly)
-
+Fix with a systemd drop-in override (survives package upgrades, cleaner than editing
+the shipped unit file):
 ```bash
 sudo mkdir -p /etc/systemd/system/ollama.service.d
 sudo tee /etc/systemd/system/ollama.service.d/override.conf > /dev/null << 'EOF'
@@ -270,25 +239,24 @@ sudo systemctl daemon-reload
 sudo systemctl restart ollama
 ```
 
-Verify from a *different* machine (or at minimum, curl the LAN-facing IP rather than
-`localhost`, to actually exercise the fix):
+Verify against the LAN-facing IP specifically, not `localhost`, to actually exercise
+the fix:
 ```bash
-curl -s http://<jetson-lan-ip>:11434/api/tags
+curl -s http://<device-lan-ip>:11434/api/tags
 ```
 
-## Part 4 — Ollama tool-calling: not every model supports it
+## Model capability gaps: tool-calling and "thinking" are separate, model-specific features
 
-Home Assistant's Assist voice/text pipeline uses Ollama's `tools` parameter (function
-calling) to let the model decide which HA service to invoke (turn on a light, check a
-sensor, etc.). **Not every Ollama model implements tool-calling** — some architectures
-(e.g. `gemma2`) will flatly reject the request:
+Integrations that let a model take actions (e.g. Home Assistant's Assist voice/text
+pipeline invoking HA services) rely on Ollama's `tools` parameter for function calling.
+**Not every model implements this** — some (e.g. `gemma2`) reject the request outright:
 
 ```json
 {"error":"registry.ollama.ai/library/gemma2:2b does not support tools"}
 ```
 
-**Verify tool-calling support directly against Ollama before wiring up Home Assistant**,
-rather than debugging it only from HA's side:
+Verify tool-calling support directly against Ollama before debugging from the
+integration's side:
 
 ```bash
 curl -s http://localhost:11434/api/chat -d '{
@@ -311,71 +279,59 @@ A working model returns a structured `tool_calls` block:
 {"message":{"tool_calls":[{"function":{"name":"HassTurnOn","arguments":{"name":"kitchen light"}}}]}}
 ```
 
-Models confirmed to support tool-calling at small sizes suitable for edge hardware
-(e.g. a Jetson Orin Nano, ~7GB RAM): `llama3.2:3b`, `qwen2.5:3b`. `qwen2.5:3b` had a
-notably faster cold-load time (~13s vs ~36s) in one real comparison on identical
-hardware — worth trying first if first-response latency matters.
+Models confirmed to support tool-calling at sizes suitable for constrained edge
+hardware (e.g. ~7GB RAM boards): `llama3.2:3b`, `qwen2.5:3b`. Cold-load time can vary
+meaningfully between similarly-sized models on identical hardware — worth benchmarking
+if first-response latency matters for the use case.
 
-## Part 5 — the hidden `think` flag: a second, unrelated capability gap
-
-Even after switching to a model that *does* support tool-calling, Home Assistant's
-Ollama integration can still fail with a different, easily-confused error:
+Separately, some integrations expose their own **"thinking"/reasoning-trace toggle**
+(distinct from tool-calling support entirely). Only specific model families implement
+Ollama's `think` feature; requesting it from an unsupported model produces a similarly
+worded but functionally different error:
 
 ```
-ollama._types.ResponseError: "<model>" does not support thinking (status code: 400)
+"<model>" does not support thinking (status code: 400)
 ```
 
-This is **not** the same problem as tool-calling support — it's a *separate* toggle in
-HA's own Ollama conversation-agent configuration (`think: true`/`false`) that controls
-whether HA asks the model to use Ollama's "thinking"/reasoning-trace feature. Only
-specific models (e.g. `gemma3`, `deepseek-r1`-family) implement that Ollama feature;
-`llama3.2:3b` and `qwen2.5:3b` do not, even though they both support tool-calling fine.
-
-**Symptom that's easy to misread:** if you already swapped the model and the model
-truly is stored correctly (confirm via `.storage/core.config_entries`, see Part 2), but
-you're still seeing a "does not support X" error referencing either the *old* model
-name or a *new* unsupported capability, check for a second, independent capability flag
-in the same config subentry — don't assume the model swap alone fixed everything just
-because the model field itself updated correctly.
+If an integration is misbehaving after a model swap and the error text references a
+*different* unsupported capability than expected, check for a second, independent
+capability flag in that integration's own configuration — a model change alone does not
+guarantee every feature toggle the integration exposes is compatible with the new
+model.
 
 ```mermaid
 flowchart TD
-    A["HA Assist: 'Unexpected error<br/>during intent recognition'"] --> B{"Check exact error text"}
-    B -- "'does not support tools'" --> C["Model lacks function-calling.<br/>Switch model (Part 4)."]
-    B -- "'does not support thinking'" --> D["Separate 'think' flag in HA's<br/>Ollama conversation config.<br/>Set think: false (Part 5)."]
-    C --> E["Re-verify with curl tools test"]
-    D --> F["Patch core.config_entries,<br/>ha core restart"]
-    E --> G["Test in HA Assist chat"]
+    A["Integration error:<br/>intent/action recognition failing"] --> B{"Read exact error text"}
+    B -- "'does not support tools'" --> C["Model lacks function-calling.<br/>Switch to a tool-calling-capable model."]
+    B -- "'does not support thinking'" --> D["Integration has a separate<br/>reasoning/'think' toggle.<br/>Disable it or switch model families."]
+    C --> E["Re-verify with a direct curl<br/>tools test"]
+    D --> F["Locate the toggle in the<br/>integration's own config"]
+    E --> G["Re-test end-to-end"]
     F --> G
     style D fill:#0d9488,color:#fff
 ```
 
-Verify directly against Ollama before touching HA config, the same way as Part 4:
+Verify directly against Ollama the same way, adding the specific flag in question:
 ```bash
 curl -s http://localhost:11434/api/chat -d '{
   "model": "<model>", "messages": [...], "stream": false, "think": true, "tools": [...]
 }'
-# {"error":"\"<model>\" does not support thinking"}  <- confirms this specific flag is the culprit
+# {"error":"\"<model>\" does not support thinking"}  <- confirms the flag itself is the cause
 ```
 
-## Summary checklist
+## Summary
 
-1. Cloud agent can't reach a home LAN IP directly — bridge via Tailscale, use the
-   `100.x.x.x` overlay address for everything.
-2. A clean SSH `Permission denied` after a successful port/ping check is an **auth**
-   problem (wrong key, wrong username), not a network problem — diagnose with `-v` and
-   grep for `Offering public key` / `No more authentication methods`.
-3. Home Assistant OS's SSH add-on is a second, separate surface (Dropbear, its own
-   config UI, its own enable/disable toggle, possibly a non-default port) — don't
-   conflate it with a normal Linux `~/.ssh/authorized_keys` setup.
-4. Ollama defaults to `127.0.0.1`-only — set `OLLAMA_HOST=0.0.0.0:11434` via a systemd
-   drop-in for LAN reachability.
-5. Verify Ollama tool-calling support directly with `curl` before assuming an
-   integration-level error is a config mistake — some models simply don't support it.
-6. Home Assistant's own Ollama integration has a separate `think` flag, independent of
-   model selection, that can cause a superficially identical-looking error for a
-   completely different reason.
-
----
-*Compiled from a real debugging session bridging an Azure-hosted AI agent to a home
-Jetson Orin Nano (Ollama) and Home Assistant OS instance via Tailscale, 2026-08-20.*
+1. A cloud agent cannot reach a home LAN IP directly — bridge with Tailscale, and use
+   the resulting overlay (`100.x.x.x`) address for everything.
+2. A clean SSH `Permission denied` after a successful port/ping check is an
+   **authentication** problem (wrong key, wrong username), not a network problem.
+3. Home Assistant OS's SSH add-on is a distinct surface from a normal Linux SSH setup —
+   separate auth config, its own enable/disable toggle, and a possibly non-default
+   port.
+4. Ollama defaults to binding `127.0.0.1` only — set `OLLAMA_HOST=0.0.0.0:<port>` via a
+   systemd drop-in for LAN/remote reachability.
+5. Verify tool-calling support directly against Ollama with `curl` before assuming an
+   integration-level error is a configuration mistake.
+6. Some integrations expose additional model-capability toggles (e.g. a "thinking"
+   flag) that are independent of model selection and can produce a superficially
+   similar but functionally different error.
