@@ -84,6 +84,7 @@ This repository serves as a comprehensive knowledge base for developers working 
 - [Model Context Protocol (MCP)](genai/model-context-protocol.md) - Extending AI with external tools
 - [Human-in-the-Loop Workflow](genai/human-in-loop-workflow.md) - AI decision review patterns
 - [LLM Inference Fundamentals](genai/llm-inference-fundamentals.md) - KV-cache, tail latency, and disaggregated serving
+- [Persistent Agent Memory with agentmemory](genai/agentmemory-persistent-agent-memory.md) - Claude Code hooks, Azure Foundry, launchd, and Obsidian export
 
 ### DevOps & Kubernetes
 - [Multi-Tier Application Architecture](devops/kubernetes/multi-tier-application-architecture.md) - Deploying scalable apps on K8s
