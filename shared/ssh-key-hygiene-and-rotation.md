@@ -14,16 +14,17 @@ is dead.
 1. [The one rule](#the-one-rule)
 2. [Choosing a key type per use](#choosing-a-key-type-per-use)
 3. [Generate on the client that will use it](#generate-on-the-client-that-will-use-it)
-4. [Authorize with restrictions](#authorize-with-restrictions)
-5. [Passphrases, the agent and client config](#passphrases-the-agent-and-client-config)
-6. [Safe rotation procedure](#safe-rotation-procedure)
-7. [Harden the servers](#harden-the-servers)
-8. [Audit what is authorized](#audit-whats-authorized)
-9. [Host keys and known_hosts](#host-keys-and-known_hosts)
-10. [Storing private keys](#storing-private-keys)
-11. [Temporary access for people and AI assistants](#temporary-access-for-people-and-ai-assistants)
-12. [Easy-to-miss details](#easy-to-miss-details)
-13. [Troubleshooting](#troubleshooting)
+4. [Allow one machine to SSH into another](#allow-one-machine-to-ssh-into-another)
+5. [Authorize with restrictions](#authorize-with-restrictions)
+6. [Passphrases, the agent and client config](#passphrases-the-agent-and-client-config)
+7. [Safe rotation procedure](#safe-rotation-procedure)
+8. [Harden the servers](#harden-the-servers)
+9. [Audit what is authorized](#audit-whats-authorized)
+10. [Host keys and known_hosts](#host-keys-and-known_hosts)
+11. [Storing private keys](#storing-private-keys)
+12. [Temporary access for people and AI assistants](#temporary-access-for-people-and-ai-assistants)
+13. [Easy-to-miss details](#easy-to-miss-details)
+14. [Troubleshooting](#troubleshooting)
 
 ## The one rule
 
@@ -98,6 +99,69 @@ ssh-keygen -t ed25519 -N "" -C "<client>-to-<server> <date>" -f ~/.ssh/<name>
 - Use one key per client-to-server relationship. If it leaks, you revoke one path.
 - Permissions must be strict or SSH refuses the key: `~/.ssh` is `700`, private keys are
   `600`.
+
+## Allow one machine to SSH into another
+
+**The rule: to let machine A log in to machine B, put A's public key on B.** The direction
+matters, and it is the most common mistake.
+
+```mermaid
+flowchart LR
+    subgraph A["Machine A (the one that logs in)"]
+        APRIV["private key (stays here)"]
+        APUB["public key (.pub)"]
+    end
+    subgraph B["Machine B (the one being logged into)"]
+        AK["~/.ssh/authorized_keys<br/>of the ACCOUNT you log in as"]
+    end
+    APUB -->|"1. copy the public key text"| AK
+    A -->|"2. ssh user@B"| B
+    B -.->|"3. checks A holds the matching private key"| A
+```
+
+Steps:
+
+1. **On machine A**, create a key pair (see the sections above) and print the public half:
+
+   ```bash
+   cat ~/.ssh/<name>.pub
+   ```
+2. **On machine B**, logged in as the account A will use (call it `<user>`), append that line
+   to the file and fix permissions:
+
+   ```bash
+   mkdir -p ~/.ssh && chmod 700 ~/.ssh
+   echo '<paste the public key line here>' >> ~/.ssh/authorized_keys
+   chmod 600 ~/.ssh/authorized_keys
+   ```
+
+   Or, from A, in one step (it asks for B's password once): `ssh-copy-id -i ~/.ssh/<name>.pub <user>@<B>`.
+3. **Test from A:** `ssh -i ~/.ssh/<name> -o IdentitiesOnly=yes <user>@<B>`.
+
+Which file, exactly? It is **the `authorized_keys` of the account you log in as**, not a
+global file and not the home folder of whoever set it up:
+
+| Target | Where the public key goes |
+|---|---|
+| Linux or macOS account `<user>` | `/home/<user>/.ssh/authorized_keys` (macOS: `/Users/<user>/.ssh/authorized_keys`) |
+| `root` login | `/root/.ssh/authorized_keys` (usually disabled or restricted) |
+| Windows OpenSSH, normal user | `%USERPROFILE%\.ssh\authorized_keys` |
+| Windows OpenSSH, administrator | `C:\ProgramData\ssh\administrators_authorized_keys` |
+| Cloud VM | The provider's "SSH key" setting or console, and/or the file above for later keys |
+| Managed appliance (for example a router or an SSH add-on) | Its own settings page or config option, not a file you edit; a restart may be needed |
+
+Things that make it silently fail:
+
+- **Wrong account.** A key added under `alice` does nothing for `ssh bob@host`.
+- **Permissions.** The home folder must not be writable by group or others, `~/.ssh` should
+  be `700` and `authorized_keys` `600`. SSH refuses keys otherwise and the only symptom is
+  `Permission denied (publickey)`.
+- **A different file is configured.** The server's `AuthorizedKeysFile` setting decides where
+  it looks. Check with `sudo sshd -T | grep authorizedkeysfile`.
+- **Line breaks in the pasted key.** The whole key must be on **one** line.
+- **SELinux systems** (RHEL family): restore labels with `restorecon -R ~/.ssh`.
+- **Two-way access needs two keys.** For B to log in to A as well, generate a *separate* key
+  on B and put its public half on A. Do not reuse A's key.
 
 ## Authorize with restrictions
 
