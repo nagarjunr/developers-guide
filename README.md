@@ -85,6 +85,7 @@ This repository serves as a comprehensive knowledge base for developers working 
 - [Human-in-the-Loop Workflow](genai/human-in-loop-workflow.md) - AI decision review patterns
 - [LLM Inference Fundamentals](genai/llm-inference-fundamentals.md) - KV-cache, tail latency, and disaggregated serving
 - [Persistent Agent Memory with agentmemory](genai/agentmemory-persistent-agent-memory.md) - Claude Code hooks, Azure Foundry, launchd, and Obsidian export
+- [Local Voice Assistant for Home Assistant on a Jetson](genai/home-assistant-local-voice-assistant-jetson.md) - Whisper, Piper and Ollama over Wyoming, model keep-alive, memory budgeting
 
 ### DevOps & Kubernetes
 - [Multi-Tier Application Architecture](devops/kubernetes/multi-tier-application-architecture.md) - Deploying scalable apps on K8s
@@ -95,6 +96,7 @@ This repository serves as a comprehensive knowledge base for developers working 
 - [Enterprise Python Setup](devops/enterprise-python-setup.md) - Corporate networks, proxies, and CA certificates
 - [Docker Builds Behind Corporate Proxies](devops/docker-corporate-proxy-build.md) - host-gateway, build-arg proxies, and private Git deps
 - [Secure Remote Access Patterns](devops/secure-remote-access-patterns.md) - Port forwarding vs. Tailscale vs. reverse SSH vs. ngrok for edge devices
+- [NVMe + NFS Backup Target for Home Assistant](devops/home-assistant-backup-nvme-nfs.md) - NFS export, fstab safety, encrypted backups, and what breaks over Wi-Fi
 
 ### Full-Stack Development
 - [FastAPI Best Practices](fullstack/backend/fastapi-best-practices.md)
