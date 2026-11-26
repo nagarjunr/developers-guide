@@ -19,9 +19,11 @@ is dead.
 6. [Safe rotation procedure](#safe-rotation-procedure)
 7. [Harden the servers](#harden-the-servers)
 8. [Audit what is authorized](#audit-whats-authorized)
-9. [Storing private keys](#storing-private-keys)
-10. [Temporary access for people and AI assistants](#temporary-access-for-people-and-ai-assistants)
-11. [Troubleshooting](#troubleshooting)
+9. [Host keys and known_hosts](#host-keys-and-known_hosts)
+10. [Storing private keys](#storing-private-keys)
+11. [Temporary access for people and AI assistants](#temporary-access-for-people-and-ai-assistants)
+12. [Easy-to-miss details](#easy-to-miss-details)
+13. [Troubleshooting](#troubleshooting)
 
 ## The one rule
 
@@ -268,6 +270,93 @@ fingerprint from private keys on the candidate machines:
 ssh-keygen -y -f ~/.ssh/<name> | ssh-keygen -lf -
 ```
 
+## Host keys and `known_hosts`
+
+There are two different kinds of SSH keys, and people often mix them up:
+
+| | Proves who | Held by | Lives in |
+|---|---|---|---|
+| **Your user key** | You, to the server | You (private), the server (public) | `~/.ssh/<name>`, server `authorized_keys` |
+| **The server's host key** | The server, to you | The server (private), you (public) | server `/etc/ssh/ssh_host_*`, your `~/.ssh/known_hosts` |
+
+`known_hosts` is the list of servers your client has met and the host key each one showed.
+It protects you from connecting to an impostor (a "man in the middle").
+
+```mermaid
+flowchart TD
+    C["You run ssh to a host"] --> K{"Host in known_hosts?"}
+    K -->|"no (first time)"| V["Show the fingerprint"]
+    V --> OB{"Matches what you<br/>verified out of band?"}
+    OB -->|"yes"| S["Save it and connect"]
+    OB -->|"no"| X["Stop. Do not connect"]
+    K -->|"yes"| M{"Same key as saved?"}
+    M -->|"yes"| OK["Connect silently"]
+    M -->|"no"| W["WARNING: host identification<br/>has changed. SSH refuses"]
+    W --> R{"Expected? (rebuilt server,<br/>reused IP address)"}
+    R -->|"yes, confirmed"| RM["ssh-keygen -R host, then reconnect"]
+    R -->|"no / unsure"| X
+```
+
+How the file behaves:
+
+- **Entries are per name or address, per port, per key type.** A server reached by LAN
+  address, by VPN address and by name gets separate entries, and each key type it offers
+  (ed25519, rsa, ecdsa) adds more lines. A non-default port is written as `[host]:port`.
+  Dozens of lines for a handful of machines is normal.
+- **Entries never expire.** Rebuilt machines and reused addresses leave stale lines. A stale
+  line is harmless until that address is reused by a different machine, and then you get the
+  "host identification has changed" warning.
+- **Old entries are not secrets.** They are public identities. Keeping them is not a
+  security problem, but they make the file hard to audit.
+- **Verify the very first connection.** The fingerprint SSH shows is only trustworthy if you
+  check it against the real server. On the server run
+  `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`; cloud consoles often print the host
+  fingerprints in the boot log.
+
+Useful commands:
+
+```bash
+ssh-keygen -F <host>              # show the saved entry for a host (also works if hashed)
+ssh-keygen -R <host>              # remove a host; writes a known_hosts.old backup
+ssh-keygen -R "[<host>]:<port>"   # remove a non-default-port entry
+ssh-keygen -lf ~/.ssh/known_hosts # list the fingerprint of every entry
+```
+
+Client settings that matter:
+
+| Setting | Meaning |
+|---|---|
+| `StrictHostKeyChecking ask` (default) | Ask about unknown hosts, refuse changed ones |
+| `StrictHostKeyChecking accept-new` | Add unknown hosts silently, still refuse changed ones. Good for scripts |
+| `StrictHostKeyChecking yes` | Never add; unknown hosts fail. Best for production automation after you pre-load keys |
+| `StrictHostKeyChecking no` | Accepts *changed* keys too. Disables the protection entirely |
+| `HashKnownHosts yes` | Store new entries with hashed host names so a stolen file does not list your servers |
+
+Do not combine `StrictHostKeyChecking=no` with `UserKnownHostsFile=/dev/null` outside
+disposable lab machines. It removes the only check against impostors and records nothing.
+
+**Pruning the file safely.** Pruning is optional housekeeping, and the worst case is that you
+re-verify a host the next time you connect.
+
+```bash
+cp -p ~/.ssh/known_hosts ~/.ssh/known_hosts.bak-$(date +%Y%m%d)      # 1. back up
+
+# 2. list hosts and see which still answer (TCP connect, 3 seconds)
+grep -v '^#' ~/.ssh/known_hosts | awk '{print $1}' | tr ',' '\n' | sort -u | while read -r e; do
+  case "$e" in \[*\]:*) h=${e#\[}; h=${h%%\]*}; p=${e##*:};; *) h=$e; p=22;; esac
+  nc -z -G 3 "$h" "$p" >/dev/null 2>&1 && echo "answers   $e" || echo "no answer $e"
+done
+
+# 3. remove only the ones you are sure are gone
+ssh-keygen -R <stale-host>
+
+# 4. prove nothing you use broke: strict checking fails if an entry is missing
+ssh -o StrictHostKeyChecking=yes -o BatchMode=yes <user>@<active-host> true
+```
+
+"No answer" only means the device is off or unreachable right now, so remove entries only for
+machines you know are retired.
+
 ## Storing private keys
 
 ```mermaid
@@ -315,6 +404,61 @@ Be aware that some AI tooling blocks an assistant from creating and authorizing 
 key on your machines. That is a sensible guardrail: access grants should be a human
 decision, not something an assistant arranges for itself.
 
+## Easy-to-miss details
+
+These are the points that are not obvious until they bite.
+
+1. **Deleting a private key file does not revoke it.** A key stops working only when its
+   *public* half is removed from every `authorized_keys` file and every cloud provider's key
+   list. The reverse also holds: removing the public half does not remove the private copies
+   you made. Do both, and check by trying the old key and expecting `Permission denied`.
+2. **Synced folders silently copy your keys.** Dropbox, iCloud Drive, Google Drive and
+   similar tools sync anything placed in them to every linked device and keep deleted
+   versions for a while. Old keys often sit in tutorial or backup folders for years. Search
+   for them by name:
+
+   ```bash
+   find <sync-folder> \( -iname '*.pem' -o -iname '*.key' -o -iname 'id_*' \) 2>/dev/null
+   ```
+
+   Derive each key's fingerprint (`ssh-keygen -y -f <file> | ssh-keygen -lf -`) and compare
+   it with your servers' `authorized_keys` to see whether it is still live. Purge deleted
+   copies from the provider's web "deleted files" list.
+3. **macOS cloud-sync folders block `rm`.** Files in a File Provider folder (for example
+   Dropbox under `~/Library/CloudStorage`) carry a `deny delete` access-control entry, so
+   `rm` fails with "Permission denied". This is how the integration works, not a lock on your
+   file. Delete through Finder (Move to Trash), which syncs the deletion. Copies you make
+   from such a folder can inherit the entry; `chmod -N <file>` clears it on a *local* copy.
+4. **A key has no creation date.** The only built-in label is the *comment* (`-C`, or
+   `ssh-keygen -c` to change it). Keep the real inventory (purpose, owner, date, where it is
+   authorized, fingerprint) in a password manager note. Changing the comment never changes
+   the key or its fingerprint, so servers do not need updating.
+5. **Log fingerprints so you can tell which key is used.** Set `LogLevel VERBOSE` in
+   `sshd_config` and the auth log records `Accepted publickey for <user> ... SHA256:<fp>` on
+   every login. Keys that never appear for months are candidates for removal.
+6. **Cloud admin keys are special.** The key you chose at VM creation is the break-glass
+   credential. Keep one copy in a password manager and out of daily use. Do not be alarmed
+   that the cloud image puts a copy in `root`'s `authorized_keys` with a forced
+   `command="echo 'Please login as the user ...'"`: that line only prints a message and is
+   not a root login.
+7. **See what is really configured.** `ssh -G <host>` prints the client's effective
+   settings, `ssh -v` shows which keys are offered and why one is refused, and
+   `sudo sshd -T` prints the server's effective configuration.
+8. **Limit how long the agent keeps a key.** `ssh-add -t 8h <key>` forgets it after eight
+   hours, `ssh-add -l` lists what is loaded and `ssh-add -D` clears everything.
+9. **Old PEM keys are a different format.** A header of `BEGIN RSA PRIVATE KEY` is the legacy
+   PEM format; `BEGIN OPENSSH PRIVATE KEY` is the current one. Some tools (including some
+   password managers) import only the newer format. Convert a *copy*, never the original:
+
+   ```bash
+   cp key.pem /tmp/key.copy && ssh-keygen -p -N "" -f /tmp/key.copy   # rewrites in the newer format
+   ```
+
+   Delete the copy as soon as you have imported it.
+10. **Secrets in git history are still live.** Deleting a key from the latest commit does not
+    remove it from history. Treat any committed key as compromised: rotate it, then scan
+    history with a secret-scanning tool.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -326,6 +470,9 @@ decision, not something an assistant arranges for itself.
 | `Connection closed` right after a service restart | The SSH service was restarting | Retry after a few seconds |
 | New key refused although added | Key added to the wrong user or the wrong account's file | Check `whoami` on the server and that file's owner |
 | `REMOTE HOST IDENTIFICATION HAS CHANGED` | The server was rebuilt or you reached a different host | Verify the new host key out of band before updating `known_hosts` |
+| `Host key verification failed` in a script | Unknown host with `StrictHostKeyChecking yes` or no terminal to ask | Pre-load the key with a verified first connection, or use `accept-new` |
+| `UNPROTECTED PRIVATE KEY FILE` | Key file readable by others | `chmod 600 <key>` |
+| `rm: Permission denied` on a file in a synced folder | Cloud-sync `deny delete` entry | Delete through Finder, or `chmod -N` on a local copy (see Easy-to-miss details) |
 | Cannot tell which key is which | Comments are unreliable | Compare fingerprints with `ssh-keygen -lf` |
 
 ## Related guides
