@@ -77,6 +77,7 @@ This repository serves as a comprehensive knowledge base for developers working 
 ### Cloud & Authentication
 - [Azure Authentication Flows](cloud/azure/authentication-flows.md) - OAuth2, service principals, and device code flow
 - [JWT and JWKS Authentication](shared/jwt-jwks-authentication.md) - Deep dive into token-based authentication
+- [SSH Key Hygiene and Safe Rotation](shared/ssh-key-hygiene-and-rotation.md) - Generate on the client, restrict automation keys, rotate in the safe order, and prove the old key is dead
 - [GCP Service Accounts Best Practices](cloud/gcp/service-accounts-best-practices.md)
 
 ### GenAI & LLM
